@@ -133,6 +133,7 @@ const uiState = {
 const app = new App({ name: "Codex Console", version: "2.0.0" }, {});
 let toastTimer = null;
 let pollTimer = null;
+let dashboardRequestInFlight = false;
 let receivedInitialToolResult = false;
 
 function escapeHtml(str) {
@@ -250,20 +251,30 @@ function ingestDashboard(data, preserveSelection = true) {
   }
 }
 
+function dashboardFingerprint(dashboard) {
+  if (!dashboard) return "";
+  const { generated_at, ...data } = dashboard;
+  return JSON.stringify(data);
+}
+
 async function refreshDashboard(silent = false) {
-  if (uiState.loadingDashboard || !uiState.caps.serverTools) return;
-  uiState.loadingDashboard = true;
+  if (dashboardRequestInFlight || !uiState.caps.serverTools) return;
+  dashboardRequestInFlight = true;
+  uiState.loadingDashboard = !silent;
+  let changed = false;
   if (!silent) render();
   try {
     const data = await callServer("app_get_dashboard", {});
-    if (data && data.ok !== false) {
-      ingestDashboard(data, true);
+    if (data?.tasks && data.ok !== false) {
+      changed = !silent || dashboardFingerprint(data) !== dashboardFingerprint(uiState.dashboard);
+      if (changed) ingestDashboard(data, true);
     }
   } catch (err) {
     if (!silent) showToast(`刷新失败: ${err.message}`, true);
   } finally {
+    dashboardRequestInFlight = false;
     uiState.loadingDashboard = false;
-    render();
+    if (!silent || (changed && uiState.modal === null)) render();
     schedulePoll();
   }
   if (uiState.selectedTaskId) {
@@ -274,6 +285,7 @@ async function refreshDashboard(silent = false) {
 async function refreshSelectedDetail(silent = false) {
   if (!uiState.selectedTaskId || uiState.loadingDetail || !uiState.caps.serverTools) return;
   uiState.loadingDetail = true;
+  let changed = false;
   if (!silent) render();
   try {
     const detail = await callServer("app_get_task_detail", {
@@ -282,13 +294,14 @@ async function refreshSelectedDetail(silent = false) {
       log_filter: uiState.logFilter,
     });
     if (detail && detail.ok) {
-      uiState.taskDetail = detail;
+      changed = !silent || JSON.stringify(detail) !== JSON.stringify(uiState.taskDetail);
+      if (changed) uiState.taskDetail = detail;
     }
   } catch (err) {
     if (!silent) showToast(`读取任务详情失败: ${err.message}`, true);
   } finally {
     uiState.loadingDetail = false;
-    render();
+    if (!silent || (changed && uiState.modal === null)) render();
   }
 }
 
@@ -691,8 +704,8 @@ function renderModal() {
     const defaultCwd = uiState.taskDetail?.task?.cwd || dash?.tasks?.[0]?.cwd || "";
     const defModel = dash?.environment?.default_model || "gpt-6.2-sol";
     const defEffort = dash?.environment?.default_reasoning_effort || "high";
-    return `<div class="modal-backdrop" data-action="close-modal">
-      <div class="modal" onclick="event.stopPropagation()">
+    return `<div class="modal-backdrop" data-modal-backdrop="true">
+      <div class="modal">
         <div class="modal-header">
           <span>派发新 Codex 任务</span>
           <button class="btn btn-ghost btn-sm" data-action="close-modal">✕</button>
@@ -744,8 +757,8 @@ function renderModal() {
 
   if (uiState.modal === "settings") {
     const s = dash?.scheduler || {};
-    return `<div class="modal-backdrop" data-action="close-modal">
-      <div class="modal" onclick="event.stopPropagation()">
+    return `<div class="modal-backdrop" data-modal-backdrop="true">
+      <div class="modal">
         <div class="modal-header">
           <span>调度器与防堵塞设置</span>
           <button class="btn btn-ghost btn-sm" data-action="close-modal">✕</button>
@@ -784,14 +797,52 @@ function renderModal() {
   return "";
 }
 
-function render() {
+function render(options = {}) {
   const root = document.getElementById("app");
   const dash = uiState.dashboard;
-  if (!dash) {
-    root.innerHTML = `<div class="boot-state">正在加载 Codex Bridge 控制台数据...</div>`;
-    return;
+  const html = dash
+    ? renderConsole(dash)
+    : `<div class="boot-state">正在加载 Codex Bridge 控制台数据...</div>`;
+  const scrollSelectors = [".task-list", ".tabs", ".modal"];
+  if (options.resetDetailScroll !== true) scrollSelectors.push(".detail-body", ".code-box");
+  const getScrollGroups = () => [
+    [document.documentElement, document.body],
+    ...scrollSelectors.map((selector) => Array.from(root.querySelectorAll(selector))),
+  ];
+  const scrollPositions = getScrollGroups().map((elements) =>
+    elements.map(({ scrollTop, scrollLeft }) => ({ scrollTop, scrollLeft }))
+  );
+  const activeElement = document.activeElement;
+  const focus = activeElement?.matches("input[id], textarea[id], select[id]")
+    ? {
+        id: activeElement.id,
+        start: activeElement.selectionStart,
+        end: activeElement.selectionEnd,
+        direction: activeElement.selectionDirection,
+      }
+    : null;
+
+  root.innerHTML = html;
+
+  const input = focus && document.getElementById(focus.id);
+  if (input) {
+    input.focus({ preventScroll: true });
+    if (typeof focus.start === "number") {
+      input.setSelectionRange(focus.start, focus.end, focus.direction);
+    }
   }
 
+  getScrollGroups().forEach((elements, groupIndex) => {
+    elements.forEach((element, index) => {
+      const position = scrollPositions[groupIndex][index];
+      if (!position) return;
+      element.scrollTop = position.scrollTop;
+      element.scrollLeft = position.scrollLeft;
+    });
+  });
+}
+
+function renderConsole(dash) {
   const c = dash.counts || {};
   const m = dash.metrics || {};
   const s = dash.scheduler || {};
@@ -814,7 +865,7 @@ function render() {
     ["resolved", c.resolved || 0],
   ];
 
-  root.innerHTML = `
+  return `
     <header class="topbar">
       <div class="brand-group">
         <span class="brand-dot ${dotClass}"></span>
@@ -1010,8 +1061,18 @@ function render() {
   `;
 }
 
+function closeModal() {
+  if (uiState.modal === null) return;
+  uiState.modal = null;
+  render();
+}
+
 // Event Delegation
 document.addEventListener("click", async (ev) => {
+  if (ev.target.matches('[data-modal-backdrop="true"]')) {
+    closeModal();
+    return;
+  }
   const target = ev.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
@@ -1034,17 +1095,19 @@ document.addEventListener("click", async (ev) => {
     uiState.mobileView = target.dataset.val;
     render();
   } else if (action === "switch-tab") {
+    const resetDetailScroll = uiState.activeTab !== target.dataset.val;
     uiState.activeTab = target.dataset.val;
-    render();
+    render({ resetDetailScroll });
     if (uiState.activeTab === "logs") await refreshSelectedDetail(true);
   } else if (action === "log-filter") {
     uiState.logFilter = target.dataset.val;
     await refreshSelectedDetail(false);
   } else if (action === "select-task") {
+    const resetDetailScroll = uiState.selectedTaskId !== target.dataset.id;
     uiState.selectedTaskId = target.dataset.id;
     uiState.mobileView = "detail";
     uiState.resumeDraft = "";
-    render();
+    render({ resetDetailScroll });
     await refreshSelectedDetail(false);
   } else if (action === "open-dispatch") {
     uiState.modal = "dispatch";
@@ -1053,8 +1116,7 @@ document.addEventListener("click", async (ev) => {
     uiState.modal = "settings";
     render();
   } else if (action === "close-modal") {
-    uiState.modal = null;
-    render();
+    closeModal();
   } else if (action === "copy-session") {
     const sid = uiState.taskDetail?.task?.session_id;
     if (sid && navigator.clipboard) {
@@ -1168,23 +1230,17 @@ document.addEventListener("click", async (ev) => {
   }
 });
 
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") closeModal();
+});
+
 document.addEventListener("input", (ev) => {
   if (ev.target.id === "taskSearchInput") {
     uiState.searchQuery = ev.target.value;
     render();
-    const el = document.getElementById("taskSearchInput");
-    if (el) {
-      el.focus();
-      el.setSelectionRange(el.value.length, el.value.length);
-    }
   } else if (ev.target.id === "logKeywordInput") {
     uiState.logKeyword = ev.target.value;
     render();
-    const el = document.getElementById("logKeywordInput");
-    if (el) {
-      el.focus();
-      el.setSelectionRange(el.value.length, el.value.length);
-    }
   } else if (ev.target.id === "resumeInstructionInput") {
     uiState.resumeDraft = ev.target.value;
   }

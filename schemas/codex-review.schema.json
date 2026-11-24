@@ -12,7 +12,7 @@
     "verdict": {
       "type": "string",
       "enum": ["approve", "changes_requested"],
-      "description": "approve if no blocking/high issues remain; otherwise changes_requested."
+      "description": "无阻塞或高危问题填 approve，否则填 changes_requested。"
     },
     "issues": {
       "type": "array",
@@ -30,23 +30,23 @@
           },
           "line": {
             "type": "integer",
-            "description": "1-based line number, or 0 if file-level."
+            "description": "从 1 开始的行号；文件级问题填 0。"
           },
           "problem": {
             "type": "string",
-            "description": "Concrete defect description without hedging."
+            "description": "使用简洁客观的简体中文描述具体缺陷，不使用防御性套话。"
           },
           "fix": {
             "type": "string",
-            "description": "Direct actionable fix."
+            "description": "使用简体中文给出直接可执行的修复方法。"
           }
         }
       },
-      "description": "Actionable findings only. Omit style nitpicks unless explicitly requested."
+      "description": "仅列有实质价值的缺陷，忽略无关痛痒的代码风格挑刺。"
     },
     "summary": {
       "type": "string",
-      "description": "One concise factual sentence summarizing review outcome."
+      "description": "用一句简明客观的简体中文总结本次审查结论。"
     }
   }
 }

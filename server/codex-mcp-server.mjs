@@ -21,7 +21,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const SERVER_NAME = "codex-bridge";
-const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "2.1.0";
 const CONSOLE_URI = "ui://codex-bridge/console.html";
 const CONSOLE_MIME = "text/html;profile=mcp-app";
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
@@ -49,11 +49,11 @@ const MAX_STORED_TASKS = 120;
 
 const EXECUTION_CONTRACT = [
   "",
-  "[EXECUTION CONTRACT]",
-  "- Edit or create files directly on disk. Do NOT paste file contents or long code blocks in your final answer.",
-  "- Run relevant build/lint/test commands before finishing and report each check in `checks`.",
-  "- Output ONLY valid JSON conforming to the required output schema.",
-  "- Use terse, objective statements. No disclaimers, no hedging, no generic caveats.",
+  "【执行契约】",
+  "- 请全程使用简体中文进行过程说明、日志输出（agent_message）以及最终回执中的所有描述字段（summary、checks[].note、blockers 等）；代码标识符、文件路径与命令保持原样。",
+  "- 直接在磁盘上修改或创建文件；严禁在最终回执中粘贴文件全文或大段代码。",
+  "- 结束前必须执行相关构建、lint 或测试验证，并将每条命令与结果如实写入 checks。",
+  "- 最终输出必须严格为符合 output-schema 的合法 JSON，表述客观精炼，禁止免责声明、防御性措辞与泛泛建议。",
 ].join("\n");
 
 // ---------------------------------------------------------------------------
@@ -238,14 +238,15 @@ function loadPersistedState() {
             status: "blocked",
             current_stage: "interrupted",
             blocker_type: "server_restarted",
-            blocker_detail: "MCP server restarted while task was active.",
+            blocker_detail: "任务执行期间 MCP 服务发生重启而中断。",
+            auto_recovery_hint: "请检查工作区 git diff 确认局部进度，随后通过 codex_resume 续跑或重新派发。",
             finished_at: nowIso,
             timeline: [
               ...(Array.isArray(t.timeline) ? t.timeline : []),
               {
                 at: nowIso,
                 event: "blocked",
-                detail: "MCP server restarted before completion",
+                detail: "MCP 服务重启导致任务中断",
               },
             ],
           };
@@ -332,7 +333,7 @@ function createTaskRecord(init) {
     errors: [],
     log_path: null,
     recovery_history: [],
-    timeline: [{ at: nowIso, event: "queued", detail: `Queued (${init.kind})` }],
+    timeline: [{ at: nowIso, event: "queued", detail: `已入队（${init.kind === "resume" ? "断点续跑" : init.kind === "review" ? "代码审查" : "新建任务"}）` }],
   };
   state.tasks.unshift(task);
   persistState(true);
@@ -351,65 +352,65 @@ function classifyBlocker({ timedOut, stalled, exitCode, errors, result }) {
   if (stalled) {
     return {
       type: "stalled",
-      detail: "Codex produced no progress before stall_timeout_seconds.",
-      hint: "Inspect tail log via codex_read_log. If task is too broad, split into smaller atomic tasks or resume from existing session_id with a narrower scope / medium reasoning effort.",
+      detail: "Codex 在静默超时阈值内无任何进展输出，已触发卡死熔断。",
+      hint: "请先调用 codex_read_log 查看尾部日志；若任务过大，拆分为更小的原子子任务，或携带已有 session_id 缩小范围（可降档至 medium）后用 codex_resume 续跑。",
     };
   }
   if (timedOut) {
     return {
       type: "timeout",
-      detail: "Codex exceeded total timeout_seconds.",
-      hint: "Check git diff to see completed partial work, then either codex_resume with remaining steps or split remaining work into parallel tasks.",
+      detail: "Codex 执行时间超出单任务总超时上限。",
+      hint: "先检查 git diff 确认已完成的改动，再用 codex_resume 续跑剩余步骤，或将剩余工作拆分为并行子任务重调度。",
     };
   }
   if (/(429|rate.?limit|too many requests|quota|overloaded)/i.test(joined)) {
     return {
       type: "rate_limit",
-      detail: "OpenAI API rate limit or quota congestion.",
-      hint: "Lower concurrency (or wait briefly), handle lightweight edits directly in Antigravity, and retry heavy Codex task later.",
+      detail: "触发 OpenAI 接口限流或配额拥塞（429/quota）。",
+      hint: "降低最大并发数并暂停叠加派单，轻量改动由 Antigravity 直接完成，稍后重试核心 Codex 任务。",
     };
   }
   if (/(unauthorized|401|not logged in|authentication|invalid api key|login required)/i.test(joined)) {
     return {
       type: "auth_error",
-      detail: "Codex CLI authentication missing or expired.",
-      hint: "Ask the user to run `codex login` in a terminal, then resume/retry the task.",
+      detail: "Codex CLI 未登录或认证凭据已过期。",
+      hint: "请提示用户在终端执行 `codex login` 重新登录，完成后再继续或重跑任务。",
     };
   }
-  if (/windows sandbox failed|provisioning service is unavailable/i.test(joined)) {
+  if (/windows sandbox failed|provisioning service is unavailable|workspace runtime provisioning service/i.test(joined)) {
     return {
       type: "sandbox_denied",
-      detail: "Windows sandbox provisioning failed.",
-      hint: 'Start Codex Desktop and retry. For trusted Windows repositories, retry with `sandbox: "danger-full-access"` in codex_run.',
+      detail: "Windows Codex 沙盒运行时服务未就绪（workspace-write 无法创建执行环境）。",
+      hint: "可启动 Codex Desktop 后重试；或在受信任的本地仓库中，改用 `sandbox: \"danger-full-access\"` 重调度执行。",
     };
   }
   if (/(permission denied|read-only file system|sandbox|eacces|eperm|operation not permitted)/i.test(joined)) {
     return {
       type: "sandbox_denied",
-      detail: "Action blocked by filesystem or Codex sandbox policy.",
-      hint: "Antigravity should inspect the blocked operation in logs, resolve workspace/environment constraints safely, and codex_resume.",
+      detail: "操作被文件系统权限或 Codex 沙盒策略拦截。",
+      hint: "由 Antigravity 查看尾部日志确认被拦截的操作，安全修复工作区/权限边界后再调用 codex_resume 续跑。",
     };
   }
   if (/(command not found|not recognized as|cannot find module|modulenotfounderror|no module named|enoent)/i.test(joined)) {
     return {
       type: "missing_dependency",
-      detail: "Missing binary, package, or file dependency during execution.",
-      hint: "Antigravity should verify environment/dependencies or install required packages, then codex_resume.",
+      detail: "执行过程中缺少必要命令、依赖包或目标文件。",
+      hint: "由 Antigravity 核查并补全本地环境/依赖，随后调用 codex_resume 续跑。",
     };
   }
   if (result?.status === "needs_input") {
     return {
       type: "needs_decision",
-      detail: (result.blockers && result.blockers[0]) || "Codex requested clarification or a design decision.",
-      hint: "If Antigravity can resolve the ambiguity from repo context/conventions, answer via codex_resume; otherwise present concise options to the user.",
+      detail: (result.blockers && result.blockers[0]) || "Codex 请求澄清需求或确认设计取舍。",
+      hint: "若可依据项目既有约定直接确定，请用中文通过 codex_resume 明确答复；仅当涉及真实业务/架构取舍时再向用户请示。",
     };
   }
   if (Array.isArray(result?.checks) && result.checks.some((c) => c.passed === false)) {
     const failedCheck = result.checks.find((c) => c.passed === false);
     return {
       type: "test_failure",
-      detail: `Check failed: ${failedCheck.command} (${failedCheck.note || "non-zero exit"})`,
-      hint: "Inspect failing diff/test output. Send targeted fix instructions via codex_resume; if still failing after 2 retries, Antigravity should take over and fix directly, then call codex_mark_resolved.",
+      detail: `验收检查未通过：${failedCheck.command}（${failedCheck.note || "退出码非 0"}）`,
+      hint: "核查失败日志与改动 diff，用中文向 codex_resume 发送精准修复指令；若连续 2 轮仍失败，由 Antigravity 直接接管修复并调用 codex_mark_resolved。",
     };
   }
   if (result?.status === "blocked" || exitCode !== 0) {
@@ -418,8 +419,8 @@ function classifyBlocker({ timedOut, stalled, exitCode, errors, result }) {
       detail:
         (result?.blockers && result.blockers[0]) ||
         (errors && errors[0]) ||
-        `Codex exited with code ${exitCode}.`,
-      hint: "Call codex_read_log to inspect root cause. Fix blocker or narrow scope and call codex_resume; if Codex stays blocked, Antigravity takes over and calls codex_mark_resolved.",
+        `Codex 非正常退出（退出码 ${exitCode}）。`,
+      hint: "调用 codex_read_log 定位根因，修复障碍或缩小范围后用 codex_resume 续跑；若持续堵塞，由 Antigravity 直接接管并调用 codex_mark_resolved。",
     };
   }
   return null;
@@ -444,7 +445,7 @@ function scheduleNext() {
     if (task.needs_cwd_lock && activeCwdLocks.has(cwdKey)) {
       if (task.current_stage !== "waiting_cwd_lock") {
         task.current_stage = "waiting_cwd_lock";
-        addTimeline(task, "waiting", `Waiting for write lock on ${task.cwd}`);
+        addTimeline(task, "waiting", `等待目录写锁释放：${task.cwd}`);
         persistState(true);
       }
       continue;
@@ -462,7 +463,7 @@ function scheduleNext() {
     task.current_stage = "starting";
     task.started_at = new Date().toISOString();
     task.last_activity_at = task.started_at;
-    addTimeline(task, "started", `Started on ${task.model} (${task.reasoning_effort})`);
+    addTimeline(task, "started", `已启动执行（${task.model} · ${task.reasoning_effort}）`);
     persistState(true);
 
     job
@@ -509,17 +510,17 @@ function enqueueTask(task, execFn) {
   return waitPromise;
 }
 
-function cancelTaskById(taskId, reason = "Cancelled by user or scheduler") {
+function cancelTaskById(taskId, reason = "由用户或调度器中止") {
   const task = findTask(taskId);
   if (!task) {
-    throw new Error(`Task not found: ${taskId}`);
+    throw new Error(`未找到任务：${taskId}`);
   }
   if (task.status !== "queued" && task.status !== "running") {
     return {
       ok: true,
       task_id: task.id,
       status: task.status,
-      note: `Task is already in terminal state '${task.status}'.`,
+      note: `任务已处于结束状态（${task.status}），无需中止。`,
     };
   }
 
@@ -666,9 +667,9 @@ function runCodexSubprocess({
 
     const hardTimer = setTimeout(() => {
       timedOut = true;
-      errors.push(`Codex execution timed out after ${Math.round(effectiveTimeoutMs / 1000)}s.`);
+      errors.push(`Codex 执行超过硬超时上限（${Math.round(effectiveTimeoutMs / 1000)} 秒）。`);
       task.current_stage = "timed_out";
-      addTimeline(task, "timeout", `Exceeded ${Math.round(effectiveTimeoutMs / 1000)}s limit`);
+      addTimeline(task, "timeout", `超出 ${Math.round(effectiveTimeoutMs / 1000)} 秒上限`);
       persistState(true);
       killChild();
     }, effectiveTimeoutMs);
@@ -680,10 +681,10 @@ function runCodexSubprocess({
       stallTimer = setTimeout(() => {
         stalled = true;
         errors.push(
-          `Codex stalled with no progress for ${Math.round(effectiveStallMs / 1000)}s.`
+          `Codex 连续 ${Math.round(effectiveStallMs / 1000)} 秒无任何进展，已自动熔断。`
         );
         task.current_stage = "stalled";
-        addTimeline(task, "stalled", `No output/events for ${Math.round(effectiveStallMs / 1000)}s`);
+        addTimeline(task, "stalled", `连续 ${Math.round(effectiveStallMs / 1000)} 秒无进展输出`);
         persistState(true);
         killChild();
       }, effectiveStallMs);
@@ -710,7 +711,7 @@ function runCodexSubprocess({
         if (evt.type === "thread.started" && evt.thread_id) {
           sessionId = evt.thread_id;
           task.session_id = sessionId;
-          addTimeline(task, "session", `Session ${sessionId}`);
+          addTimeline(task, "session", `已建立会话 ${sessionId}`);
           touchActivity("executing");
         } else {
           if (!sessionId && typeof evt.thread_id === "string") {
@@ -891,14 +892,14 @@ function finalizeTaskRecord(task, run, { parsedReceipt, isReview, includeDiffSta
     task.blocker_type = blocker.type;
     task.blocker_detail = blocker.detail;
     task.auto_recovery_hint = blocker.hint;
-    addTimeline(task, task.status, `${blocker.type}: ${blocker.detail}`);
+    addTimeline(task, task.status, `${blocker.detail}`);
   } else {
     task.status = "done";
     task.current_stage = "completed";
     task.blocker_type = null;
     task.blocker_detail = null;
     task.auto_recovery_hint = null;
-    addTimeline(task, "done", `Finished in ${task.duration_sec}s`);
+    addTimeline(task, "done", `执行完成，耗时 ${task.duration_sec} 秒`);
   }
   persistState(true);
 }
@@ -1119,12 +1120,12 @@ async function handleCodexReview(params) {
   const background = params.background === true;
 
   const targetDesc = params.commit
-    ? `Review commit ${params.commit}`
+    ? `审查提交 ${params.commit}`
     : params.base
-    ? `Review vs ${params.base}`
+    ? `审查分支差异（对比 ${params.base}）`
     : params.instructions
-    ? deriveTitle(params.instructions, "Custom code review")
-    : "Review uncommitted changes";
+    ? deriveTitle(params.instructions, "自定义代码审查")
+    : "审查当前未提交代码改动";
 
   const task = createTaskRecord({
     kind: "review",
@@ -1158,7 +1159,7 @@ async function handleCodexReview(params) {
       args.push("--base", String(params.base));
     } else if (hasCustomInstructions) {
       args.push("-");
-      stdinText = `${params.instructions.trim()}\n\nReturn ONLY JSON matching the review schema. No disclaimers or hedging.\n`;
+      stdinText = `${params.instructions.trim()}\n\n请全程使用简洁客观的简体中文，仅输出符合审查 Schema 的合法 JSON，禁止免责声明与防御性措辞。\n`;
     } else {
       args.push("--uncommitted");
     }
@@ -1250,10 +1251,10 @@ function handleCodexStatus(params) {
 
 function handleMarkResolved(params) {
   const task = findTask(params.task_id);
-  if (!task) throw new Error(`Task not found: ${params.task_id}`);
+  if (!task) throw new Error(`未找到任务：${params.task_id}`);
   const nowIso = new Date().toISOString();
   const action = params.action || "antigravity_takeover";
-  const summary = params.summary || "Resolved automatically by Antigravity.";
+  const summary = params.summary || "已由 Antigravity 自动解决并验收。";
 
   task.status = "resolved";
   task.current_stage = "resolved_by_antigravity";
@@ -1266,7 +1267,7 @@ function handleMarkResolved(params) {
     note: summary,
     changed_files: Array.isArray(params.changed_files) ? params.changed_files : [],
   });
-  addTimeline(task, "resolved", `Antigravity (${action}): ${summary}`);
+  addTimeline(task, "resolved", `Antigravity（${action}）：${summary}`);
   persistState(true);
 
   return {
@@ -1996,7 +1997,7 @@ async function handleRequest(msg) {
         version: SERVER_VERSION,
       },
       instructions:
-        "Use codex_run for heavy coding/doc work, codex_resume to reuse Prompt Cache, codex_review for diff audits, codex_status/codex_cancel/codex_mark_resolved for automated blocker recovery & scheduling, and codex_console to open or refresh the visual Codex Console.",
+        "所有下发给 Codex 的指令、恢复摘要与原因均使用简体中文。使用 codex_run 委派重任务，codex_resume 复用 Prompt Cache，codex_review 执行代码审查，codex_status/codex_cancel/codex_mark_resolved 配合自动防堵塞调度，codex_console 打开或刷新可视化控制台。",
     });
     return;
   }
@@ -2050,7 +2051,7 @@ async function handleRequest(msg) {
     try {
       if (toolName === "codex_console") {
         const snapshot = buildDashboardSnapshot(toolArgs);
-        const summaryLine = `Codex Console ready: running=${snapshot.counts.running}, queued=${snapshot.counts.queued}, blocked=${snapshot.counts.blocked + snapshot.counts.needs_input}, done=${snapshot.counts.done}, resolved=${snapshot.counts.resolved}, cache_hit=${snapshot.metrics.cache_hit_rate_pct}%.`;
+        const summaryLine = `Codex 控制台已就绪：运行中=${snapshot.counts.running}，排队中=${snapshot.counts.queued}，堵塞=${snapshot.counts.blocked + snapshot.counts.needs_input}，已完成=${snapshot.counts.done}，已自动接管=${snapshot.counts.resolved}，缓存命中率=${snapshot.metrics.cache_hit_rate_pct}%。`;
         sendResult(id, {
           content: [{ type: "text", text: summaryLine }],
           structuredContent: snapshot,

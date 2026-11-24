@@ -256,7 +256,8 @@ test("MCP server + MCP App Console + scheduler + blocker auto-recovery lifecycle
     const blockedData = JSON.parse(blockedResp.result.content[0].text);
     assert.equal(blockedData.status, "blocked");
     assert.equal(blockedData.blocker.type, "rate_limit");
-    assert.ok(blockedData.blocker.auto_recovery_hint.length > 10);
+    assert.ok(blockedData.blocker.detail.includes("限流"));
+    assert.ok(blockedData.blocker.auto_recovery_hint.includes("并发"));
 
     const resolveResp = await client.request("tools/call", {
       name: "codex_mark_resolved",

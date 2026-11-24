@@ -14,21 +14,21 @@
     "status": {
       "type": "string",
       "enum": ["done", "blocked", "needs_input"],
-      "description": "done when task and checks succeeded; blocked on unrecoverable error; needs_input when user decision is required."
+      "description": "任务和检查全部通过填 done；遇到无法自行解决的故障填 blocked；需要用户拍板业务取舍填 needs_input。"
     },
     "changed_files": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Relative paths of files created, modified, or deleted."
+      "description": "本次新建、修改或删除的文件相对路径列表。"
     },
     "summary": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Up to 5 terse factual bullets describing what changed. No disclaimers, hedging, or pasted code."
+      "description": "最多 5 条简明客观的简体中文改动要点。禁止免责声明、防御性措辞或粘贴大段代码。"
     },
     "checks": {
       "type": "array",
@@ -39,26 +39,26 @@
         "properties": {
           "command": {
             "type": "string",
-            "description": "Exact verification command run (test/lint/typecheck/build)."
+            "description": "实际执行的验证命令（测试/lint/类型检查/构建）。"
           },
           "passed": {
             "type": "boolean",
-            "description": "Whether the command exited with code 0."
+            "description": "该命令退出码是否为 0。"
           },
           "note": {
             "type": "string",
-            "description": "Terse 1-line outcome (e.g. '24 passed' or concise failure cause)."
+            "description": "用一行简明简体中文说明结果（如“1 项测试全部通过”或具体失败原因）。"
           }
         }
       },
-      "description": "Checks executed by Codex before finishing."
+      "description": "结束前实际执行过的验收命令列表。"
     },
     "blockers": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Concrete unresolved failures or required user decisions. Empty array if none."
+      "description": "使用简体中文列出真实未解决的堵塞点或待用户决策项；无堵塞则为空数组。"
     }
   }
 }

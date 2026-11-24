@@ -6,9 +6,9 @@
 
 ## 核心架构与特性
 
-### 1. 清晰的双模型分工
-- **Antigravity（总控 / 调度 / 自动解堵 / 验收与人话翻译）**：拆解任务、下达极简引用单、监控调度队列、验收 `git diff` 与测试结果，并剔除 GPT 惯用的防御性套话与免责声明，只输出清晰结论与真实风险。
-- **本地 Codex CLI（主力执行者）**：默认以 `gpt-6.2-sol`（`reasoning_effort="high"`）直接完成多文件编写、重构、测试修复、长文档撰写与 Code Review。
+### 1. 清晰的双模型分工与全链路中文体验
+- **Antigravity（总控 / 调度 / 自动解堵 / 验收与人话翻译）**：全程使用**简体中文**思考、拆解任务、向 Codex 下达极简引用单、监控调度队列、验收 `git diff` 与测试结果，并剔除 GPT 惯用的防御性套话与免责声明，只输出清晰结论与真实风险。
+- **本地 Codex CLI（主力执行者）**：默认以 `gpt-6.2-sol`（`reasoning_effort="high"`）接收中文任务单与内置中文执行契约，直接完成多文件编写、重构、测试修复、长文档撰写与 Code Review，其过程日志、结构化回执、堵塞原因与调度建议均以简体中文输出。
 
 ### 2. 极速 & 极省 Token 设计
 - **零运行时依赖**：MCP Server 仅使用 Node.js 内置标准库，控制台前端已预打包为单文件 `ui/dist/console.html`。在其他电脑安装**无需 `npm install` 或 `pip install`**，`git clone` 即用，Windows / macOS / Linux 完全通用。

@@ -16,6 +16,94 @@ const STATUS_LABELS = {
   cancelled: "已取消",
 };
 
+const KIND_LABELS = {
+  run: "新建",
+  resume: "续跑",
+  review: "审查",
+};
+
+const BLOCKER_LABELS = {
+  stalled: "无进度卡死",
+  timeout: "执行超时",
+  rate_limit: "接口限流",
+  auth_error: "认证失效",
+  sandbox_denied: "沙盒拦截",
+  missing_dependency: "缺少依赖",
+  test_failure: "检查未通过",
+  needs_decision: "待人工决策",
+  execution_error: "执行报错",
+  server_restarted: "服务重启中断",
+};
+
+const ACTION_LABELS = {
+  antigravity_takeover: "Antigravity 直接接管修复",
+  split_and_rescheduled: "拆分子任务重调度",
+  env_fixed_and_resumed: "修复环境并重调度",
+  concurrency_throttled: "降并发限流调度",
+};
+
+const TIMELINE_EVENT_LABELS = {
+  queued: "入队",
+  waiting: "等待目录锁",
+  started: "启动执行",
+  session: "建立会话",
+  timeout: "硬超时",
+  stalled: "静默卡死",
+  blocked: "堵塞告警",
+  needs_input: "待决策",
+  cancelling: "中止中",
+  cancelled: "已取消",
+  done: "执行完成",
+  resolved: "自动解堵",
+};
+
+const STAGE_LABELS = {
+  queued: "排队等待",
+  waiting_cwd_lock: "等待同目录写锁",
+  starting: "正在启动",
+  executing: "执行中",
+  finalizing: "生成回执",
+  completed: "已完成",
+  resolved_by_antigravity: "已由 Antigravity 自动解决",
+  stalled: "无进度卡死",
+  timed_out: "执行超时",
+  cancelled: "已取消",
+  interrupted: "服务重启中断",
+};
+
+const SEVERITY_LABELS = {
+  critical: "致命",
+  high: "高危",
+  medium: "中危",
+  low: "低危",
+};
+
+function labelBlocker(type) {
+  return BLOCKER_LABELS[type] || type || "未知堵塞";
+}
+
+function labelAction(action) {
+  return ACTION_LABELS[action] || action || "自动处理";
+}
+
+function labelTimelineEvent(evt) {
+  return TIMELINE_EVENT_LABELS[evt] || evt || "事件";
+}
+
+function labelStage(stage) {
+  if (!stage) return "-";
+  if (stage.startsWith("running:")) return `执行中（${stage.slice(8)}）`;
+  return STAGE_LABELS[stage] || BLOCKER_LABELS[stage] || stage;
+}
+
+function labelKind(kind) {
+  return KIND_LABELS[kind] || kind;
+}
+
+function labelSeverity(sev) {
+  return SEVERITY_LABELS[sev] || sev;
+}
+
 const uiState = {
   dashboard: null,
   selectedTaskId: null,
@@ -332,14 +420,14 @@ function renderDetailBody(detail) {
     const blockerHtml = t.blocker_type
       ? `<div class="panel panel-alert">
            <div class="panel-title">
-             <span>堵塞诊断 · ${escapeHtml(t.blocker_type)}</span>
+             <span>堵塞诊断 · ${escapeHtml(labelBlocker(t.blocker_type))}</span>
              ${
                uiState.caps.message
                  ? `<button class="btn btn-sm btn-warn" data-action="ask-unblock">让 Antigravity 自动解堵</button>`
                  : ""
              }
            </div>
-           <div><strong>原因：</strong>${escapeHtml(t.blocker_detail || "未知阻塞")}</div>
+           <div><strong>原因：</strong>${escapeHtml(t.blocker_detail || "未知堵塞")}</div>
            ${
              t.auto_recovery_hint
                ? `<div style="margin-top:6px;color:var(--fg-2)"><strong>调度建议：</strong>${escapeHtml(t.auto_recovery_hint)}</div>`
@@ -357,7 +445,7 @@ function renderDetailBody(detail) {
                  .map(
                    (r) => `<div class="tl-item">
                      <span class="tl-time">${escapeHtml(formatTimeShort(r.at))}</span>
-                     <span class="tl-evt">${escapeHtml(r.action)}</span>
+                     <span class="tl-evt">${escapeHtml(labelAction(r.action))}</span>
                      <span class="tl-detail">${escapeHtml(r.note)}</span>
                    </div>`
                  )
@@ -371,8 +459,8 @@ function renderDetailBody(detail) {
       const issues = Array.isArray(t.review.issues) ? t.review.issues : [];
       receiptHtml = `<div class="panel">
         <div class="panel-title">
-          <span>Code Review 结果</span>
-          <span class="status-badge ${t.review.verdict === "approve" ? "status-done" : "status-blocked"}">${escapeHtml(t.review.verdict || "unknown")}</span>
+          <span>代码审查结果</span>
+          <span class="status-badge ${t.review.verdict === "approve" ? "status-done" : "status-blocked"}">${t.review.verdict === "approve" ? "通过" : "需修改"}</span>
         </div>
         <div style="margin-bottom:8px">${escapeHtml(t.review.summary || "")}</div>
         ${
@@ -383,7 +471,7 @@ function renderDetailBody(detail) {
                   ${issues
                     .map(
                       (i) => `<tr>
-                        <td><span class="kind-tag">${escapeHtml(i.severity)}</span></td>
+                        <td><span class="kind-tag">${escapeHtml(labelSeverity(i.severity))}</span></td>
                         <td class="mono">${escapeHtml(i.file)}${i.line ? `:${i.line}` : ""}</td>
                         <td>${escapeHtml(i.problem)}</td>
                         <td>${escapeHtml(i.fix)}</td>
@@ -410,7 +498,7 @@ function renderDetailBody(detail) {
         }
         ${
           blockers.length > 0
-            ? `<div style="margin-top:8px;color:var(--err-fg)"><strong>上报阻塞：</strong> ${escapeHtml(blockers.join("；"))}</div>`
+            ? `<div style="margin-top:8px;color:var(--err-fg)"><strong>上报堵塞：</strong> ${escapeHtml(blockers.join("；"))}</div>`
             : ""
         }
       </div>
@@ -424,7 +512,7 @@ function renderDetailBody(detail) {
                   ${checks
                     .map(
                       (c) => `<tr>
-                        <td><span class="status-badge ${c.passed ? "status-done" : "status-blocked"}">${c.passed ? "PASS" : "FAIL"}</span></td>
+                        <td><span class="status-badge ${c.passed ? "status-done" : "status-blocked"}">${c.passed ? "通过" : "失败"}</span></td>
                         <td class="mono">${escapeHtml(c.command)}</td>
                         <td>${escapeHtml(c.note)}</td>
                       </tr>`
@@ -438,7 +526,7 @@ function renderDetailBody(detail) {
     } else if (t.status === "running" || t.status === "queued") {
       receiptHtml = `<div class="panel">
         <div class="panel-title">实时执行进度</div>
-        <div>当前阶段：<span class="mono">${escapeHtml(t.current_stage)}</span> · 已捕获 JSONL 事件：<strong>${t.event_count || 0}</strong> · 最近活跃：${escapeHtml(formatTimeShort(t.last_activity_at))}</div>
+        <div>当前阶段：<strong>${escapeHtml(labelStage(t.current_stage))}</strong> · 已捕获事件：<strong>${t.event_count || 0}</strong> · 最近活跃：${escapeHtml(formatTimeShort(t.last_activity_at))}</div>
       </div>`;
     }
 
@@ -539,7 +627,7 @@ function renderDetailBody(detail) {
           .map(
             (ev) => `<div class="tl-item">
               <span class="tl-time">${escapeHtml(formatTimeShort(ev.at))}</span>
-              <span class="tl-evt">${escapeHtml(ev.event)}</span>
+              <span class="tl-evt">${escapeHtml(labelTimelineEvent(ev.event))}</span>
               <span class="tl-detail">${escapeHtml(ev.detail)}</span>
             </div>`
           )
@@ -555,7 +643,7 @@ function renderDetailBody(detail) {
                 (item) => `<div class="file-row">
                   <div>
                     ${renderStatusBadge(item.status)}
-                    <span class="kind-tag" style="margin-left:4px">${escapeHtml(item.kind)}</span>
+                    <span class="kind-tag" style="margin-left:4px">${escapeHtml(labelKind(item.kind))}</span>
                     <span style="margin-left:6px">${escapeHtml(item.title)}</span>
                   </div>
                   <button class="btn btn-sm" data-action="select-task" data-id="${escapeHtml(item.id)}">查看</button>
@@ -828,8 +916,8 @@ function render() {
                       <div class="task-card-top">
                         <div class="badge-row">
                           ${renderStatusBadge(t.status)}
-                          <span class="kind-tag">${escapeHtml(t.kind)}</span>
-                          ${t.worktree ? `<span class="kind-tag">WT</span>` : ""}
+                          <span class="kind-tag">${escapeHtml(labelKind(t.kind))}</span>
+                          ${t.worktree ? `<span class="kind-tag">工作树</span>` : ""}
                         </div>
                         <span class="mono" style="color:var(--fg-3)">${escapeHtml(formatDuration(t.duration_sec))}</span>
                       </div>
@@ -840,7 +928,7 @@ function render() {
                         ${t.changed_files_count > 0 ? `<span>${t.changed_files_count} 文件</span>` : ""}
                         ${checkBadge}
                         ${cacheBadge}
-                        ${t.blocker_type ? `<span class="err">${escapeHtml(t.blocker_type)}</span>` : ""}
+                        ${t.blocker_type ? `<span class="err">${escapeHtml(labelBlocker(t.blocker_type))}</span>` : ""}
                       </div>
                     </div>`;
                   })
@@ -864,7 +952,7 @@ function render() {
                   <div>
                     <div class="badge-row" style="margin-bottom:4px">
                       ${renderStatusBadge(detail.task.status)}
-                      <span class="kind-tag">${escapeHtml(detail.task.kind)}</span>
+                      <span class="kind-tag">${escapeHtml(labelKind(detail.task.kind))}</span>
                       <span class="mono" style="color:var(--fg-3)">${escapeHtml(detail.task.id)}</span>
                     </div>
                     <div class="detail-title">${escapeHtml(detail.task.title)}</div>

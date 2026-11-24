@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodexReviewReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "issues",
+    "summary"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "changes_requested"],
+      "description": "approve if no blocking/high issues remain; otherwise changes_requested."
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "problem", "fix"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-based line number, or 0 if file-level."
+          },
+          "problem": {
+            "type": "string",
+            "description": "Concrete defect description without hedging."
+          },
+          "fix": {
+            "type": "string",
+            "description": "Direct actionable fix."
+          }
+        }
+      },
+      "description": "Actionable findings only. Omit style nitpicks unless explicitly requested."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One concise factual sentence summarizing review outcome."
+    }
+  }
+}

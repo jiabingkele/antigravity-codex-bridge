@@ -1,0 +1,7 @@
+.DS_Store
+Thumbs.db
+*.log
+.codex_last.json
+.codex_run.log
+node_modules/
+ui/node_modules/

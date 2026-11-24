@@ -1,0 +1,15 @@
+{
+  "name": "codex-bridge",
+  "displayName": "Codex Bridge",
+  "version": "2.0.0",
+  "author": "jiabingkele",
+  "homepage": "https://github.com/jiabingkele/antigravity-codex-bridge",
+  "repository": "https://github.com/jiabingkele/antigravity-codex-bridge",
+  "description": "Orchestrate local OpenAI Codex CLI (gpt-6.2-sol high) from Antigravity with an interactive in-app Codex Console, automatic blocker recovery & scheduling, strict JSON receipts, Prompt Cache resume, and non-defensive reporting.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the Codex Console so I can monitor and manage Codex tasks visually",
+    "Delegate this multi-file refactor to Codex (gpt-6.2-sol high), auto-resolve any blockers, and summarize the verified diff",
+    "Run a Codex code review on my uncommitted changes and list only actionable fixes"
+  ]
+}

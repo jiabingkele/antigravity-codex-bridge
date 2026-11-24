@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodexExecutionReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "changed_files",
+    "summary",
+    "checks",
+    "blockers"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["done", "blocked", "needs_input"],
+      "description": "done when task and checks succeeded; blocked on unrecoverable error; needs_input when user decision is required."
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Relative paths of files created, modified, or deleted."
+    },
+    "summary": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Up to 5 terse factual bullets describing what changed. No disclaimers, hedging, or pasted code."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "passed", "note"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Exact verification command run (test/lint/typecheck/build)."
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether the command exited with code 0."
+          },
+          "note": {
+            "type": "string",
+            "description": "Terse 1-line outcome (e.g. '24 passed' or concise failure cause)."
+          }
+        }
+      },
+      "description": "Checks executed by Codex before finishing."
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Concrete unresolved failures or required user decisions. Empty array if none."
+    }
+  }
+}

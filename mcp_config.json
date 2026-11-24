@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "codex-bridge": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/server/codex-mcp-server.mjs"
+      ],
+      "env": {
+        "CODEX_BRIDGE_MODEL": "gpt-6.2-sol",
+        "CODEX_BRIDGE_REASONING_EFFORT": "high",
+        "CODEX_BRIDGE_MAX_CONCURRENCY": "2",
+        "CODEX_BRIDGE_STALL_TIMEOUT_SEC": "180",
+        "CODEX_BRIDGE_DATA_DIR": "${PLUGIN_DATA}"
+      }
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,10 +7,141 @@ import readline from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import {
+  buildCodexEnvironment,
+  diagnoseCodexLaunch,
+  findStoreCodex,
+  localCodexCandidates,
+  storeCodexCandidates,
+} from "../server/codex-cli.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SERVER_PATH = path.join(REPO_ROOT, "server", "codex-mcp-server.mjs");
+const isWindows = process.platform === "win32";
+
+function testDirectory(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bridge-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function writeExecutable(file, content = "") {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content, { mode: 0o755 });
+  return file;
+}
+
+test("子进程 PATH 保留原有绝对目录并补齐 Node.js 和全局安装位置", () => {
+  const root = path.resolve(os.tmpdir(), "Codex 环境");
+  const nodeDir = path.join(root, "Node.js");
+  const bin = path.join(root, "旧 PATH");
+  const npm = path.join(root, "npm-prefix");
+  const roaming = path.join(root, "Roaming");
+  const local = path.join(root, "Local");
+  const env = {
+    [isWindows ? "Path" : "PATH"]: [`"${bin}"`, isWindows ? bin.toUpperCase() : bin, "", "."].join(path.delimiter),
+    ProgramFiles: path.join(root, "Program Files"),
+    NPM_CONFIG_PREFIX: npm,
+    APPDATA: roaming,
+    LOCALAPPDATA: local,
+    CODEX_HOME: path.join(root, "codex-home"),
+  };
+  const patched = buildCodexEnvironment(env, path.join(nodeDir, isWindows ? "node.exe" : "node"), root);
+  const dirs = patched.PATH.split(path.delimiter);
+  assert.deepEqual(dirs.slice(0, 2), [nodeDir, bin]);
+  assert.equal(dirs.length, new Set(dirs.map((dir) => isWindows ? dir.toLowerCase() : dir)).size);
+  assert.ok(dirs.every((dir) => path.isAbsolute(dir)));
+  assert.equal(patched.CODEX_HOME, env.CODEX_HOME);
+  if (isWindows) {
+    assert.equal("Path" in patched, false);
+    assert.ok(dirs.includes(npm));
+    assert.ok(dirs.includes(path.join(roaming, "npm")));
+    assert.ok(dirs.includes(path.join(local, "Microsoft", "WindowsApps")));
+    assert.ok(dirs.includes(path.join(env.ProgramFiles, "nodejs")));
+    assert.ok("Path" in env);
+  } else {
+    assert.ok(dirs.includes(path.join(npm, "bin")));
+    assert.ok(dirs.includes(path.join(root, ".local", "bin")));
+  }
+});
+
+test("优先解析 npm 平台包原生文件并兼容旧版 vendor 目录", (t) => {
+  const cpu = { x64: "x86_64", arm64: "aarch64" }[process.arch];
+  const abi = { win32: "pc-windows-msvc", darwin: "apple-darwin", linux: "unknown-linux-musl" }[process.platform];
+  if (!cpu || !abi) return t.skip("当前平台没有对应的 Codex npm 平台包");
+  const root = testDirectory(t);
+  const bin = isWindows ? root : path.join(root, "bin");
+  const modules = path.join(root, ...(isWindows ? [] : ["lib"]), "node_modules", "@openai");
+  const executable = isWindows ? "codex.exe" : "codex";
+  const launcher = writeExecutable(path.join(bin, isWindows ? "codex.cmd" : "codex"));
+  const platformPackage = `codex-${process.platform}-${process.arch}`;
+  const vendorPath = ["vendor", `${cpu}-${abi}`];
+  const nested = writeExecutable(path.join(modules, "codex", "node_modules", "@openai", platformPackage, ...vendorPath, "bin", executable));
+  const hoisted = writeExecutable(path.join(modules, platformPackage, ...vendorPath, "bin", executable));
+  const legacy = writeExecutable(path.join(modules, "codex", ...vendorPath, "codex", executable));
+  assert.deepEqual([...localCodexCandidates({ PATH: bin })], [nested, hoisted, legacy, launcher]);
+  fs.unlinkSync(nested);
+  fs.unlinkSync(hoisted);
+  assert.deepEqual([...localCodexCandidates({ PATH: bin })], [legacy, launcher]);
+});
+
+function storeFixture(root, version, arch = process.arch) {
+  const dir = path.join(root, `OpenAI.Codex_${version}_${arch}__publisher`);
+  const binary = writeExecutable(path.join(dir, "app", "resources", "codex.exe"));
+  return { dir, binary };
+}
+
+test("商店安装路径按数字版本排序并跳过其他架构、资源包和缺失文件", (t) => {
+  const root = testDirectory(t);
+  const old = storeFixture(root, "26.9.200.0");
+  const latest = storeFixture(root, "26.10.2.0");
+  const otherArch = storeFixture(root, "27.0.0.0", "unsupported");
+  const resource = path.join(root, `OpenAI.Codex_28.0.0.0_${process.arch}_resource_publisher`);
+  writeExecutable(path.join(resource, "app", "resources", "codex.exe"));
+  const missing = path.join(root, `OpenAI.Codex_29.0.0.0_${process.arch}__publisher`);
+  fs.mkdirSync(path.join(missing, "app", "resources", "codex.exe"), { recursive: true });
+  assert.deepEqual(
+    storeCodexCandidates([old.dir, otherArch.dir, missing, latest.dir, resource, latest.dir]),
+    [latest.binary, old.binary],
+  );
+});
+
+test("Windows AppX 查询失败后仍会跨 Program Files 目录查找最新商店版", { skip: !isWindows }, async (t) => {
+  const root = testDirectory(t);
+  const programFiles = path.join(root, "Program Files");
+  const programFiles64 = path.join(root, "Program Files 64");
+  const old = storeFixture(path.join(programFiles, "WindowsApps"), "26.9.0.0");
+  const latest = storeFixture(path.join(programFiles64, "WindowsApps"), "26.10.0.0");
+  const env = { SystemRoot: path.join(root, "不存在的 Windows"), ProgramFiles: programFiles, ProgramW6432: programFiles64 };
+  const discovered = [];
+  for await (const binary of findStoreCodex(env, 500)) discovered.push(binary);
+  assert.deepEqual(discovered, [latest.binary, old.binary]);
+});
+
+test("启动诊断区分 CLI 缺失与工作目录消失", (t) => {
+  const missingCli = diagnoseCodexLaunch("codex", { error: { code: "ENOENT" } });
+  assert.equal(missingCli.type, "missing_dependency");
+  assert.match(missingCli.hint, /npm install -g @openai\/codex/);
+  const missingCwd = diagnoseCodexLaunch("codex", {
+    error: { code: "ENOENT" }, cwd: path.join(testDirectory(t), "missing"),
+  });
+  assert.equal(missingCwd.type, "execution_error");
+  assert.match(missingCwd.detail, /任务工作目录已不存在/);
+});
+
+test("Windows 启动诊断识别英文和非 UTF-8 的 node 未找到提示", { skip: !isWindows }, () => {
+  for (const stderr of [
+    `'"node"' is not recognized as an internal or external command,\r\noperable program or batch file.`,
+    Buffer.from([0x27, 0x22, 0x6e, 0x6f, 0x64, 0x65, 0x22, 0x27, 0x20, 0xb2, 0xbb, 0xca, 0xc7]).toString("utf8"),
+  ]) {
+    const blocker = diagnoseCodexLaunch("codex.cmd", { stderr });
+    assert.equal(blocker.type, "missing_dependency");
+    assert.match(blocker.detail, /找不到 Node\.js/);
+    assert.match(blocker.hint, /重新派发任务/);
+    assert.equal(diagnoseCodexLaunch("codex.exe", { stderr }), null);
+  }
+});
 
 function createConsoleHarness() {
   const source = fs.readFileSync(path.join(REPO_ROOT, "ui", "src", "app.js"), "utf8")
@@ -238,7 +369,7 @@ test("控制台轮询仅渲染变更并保留滚动、焦点和选区", async ()
   assert.deepEqual(positions(ui.root.querySelectorAll(".code-box")), [[0, 0]]);
 });
 
-function createMockCodex(tmpDir) {
+function createMockCodex(tmpDir, { discoverable = false } = {}) {
   const mockJsPath = path.join(tmpDir, "mock-codex.mjs");
   const mockScript = `
 import fs from "node:fs";
@@ -325,16 +456,9 @@ if (process.env.MOCK_CAPTURE_FILE) {
 `;
   fs.writeFileSync(mockJsPath, mockScript, "utf8");
 
-  if (process.platform === "win32") {
-    const cmdPath = path.join(tmpDir, "mock-codex.cmd");
-    fs.writeFileSync(cmdPath, `@echo off\r\n"${process.execPath}" "${mockJsPath}" %*\r\n`, "utf8");
-    return cmdPath;
-  } else {
-    const shPath = path.join(tmpDir, "mock-codex.sh");
-    fs.writeFileSync(shPath, `#!/usr/bin/env bash\nexec "${process.execPath}" "${mockJsPath}" "$@"\n`, "utf8");
-    fs.chmodSync(shPath, 0o755);
-    return shPath;
-  }
+  return isWindows
+    ? writeExecutable(path.join(tmpDir, discoverable ? "codex.cmd" : "mock-codex.cmd"), '@echo off\r\n"node" "%~dp0mock-codex.mjs" %*\r\n')
+    : writeExecutable(path.join(tmpDir, discoverable ? "codex" : "mock-codex.sh"), `#!/bin/sh\nexec node "${mockJsPath}" "$@"\n`);
 }
 
 class McpTestClient {
@@ -376,7 +500,121 @@ class McpTestClient {
   }
 }
 
-test("MCP server + MCP App Console + scheduler + blocker auto-recovery lifecycle", async () => {
+function isolatedServerEnv(tmpDir, env = {}) {
+  return {
+    CODEX_BIN: "",
+    CODEX_BRIDGE_DATA_DIR: path.join(tmpDir, "data"),
+    PATH: "",
+    APPDATA: path.join(tmpDir, "Roaming"),
+    LOCALAPPDATA: path.join(tmpDir, "Local"),
+    NPM_CONFIG_PREFIX: "",
+    npm_config_prefix: "",
+    ...env,
+  };
+}
+
+function selfTest(env) {
+  const result = spawnSync(process.execPath, [SERVER_PATH, "--self-test"], {
+    env: { ...process.env, ...env }, encoding: "utf8", timeout: 10000,
+  });
+  assert.equal(result.error, undefined);
+  return { status: result.status, report: JSON.parse(result.stdout) };
+}
+
+function callTool(client, name, args = {}) {
+  return client.request("tools/call", { name, arguments: args });
+}
+
+test("跳过无效候选并在旧 PATH 下自动探测和执行 npm 启动器", async (t) => {
+  const root = testDirectory(t);
+  const globalBin = isWindows ? path.join(root, "Roaming", "npm") : path.join(root, "npm-prefix", "bin");
+  const earlier = path.join(root, "失效的 CLI");
+  writeExecutable(path.join(earlier, isWindows ? "codex.exe" : "codex"), "#!/bin/sh\necho invalid-launcher\n");
+  fs.mkdirSync(globalBin, { recursive: true });
+  const launcher = createMockCodex(globalBin, { discoverable: true });
+  const capture = path.join(root, "capture.json");
+  const env = isolatedServerEnv(root, {
+    PATH: earlier, NPM_CONFIG_PREFIX: isWindows ? "" : path.dirname(globalBin), MOCK_CAPTURE_FILE: capture,
+  });
+  const { status, report } = selfTest(env);
+  assert.equal(status, 0, JSON.stringify(report));
+  assert.equal(report.codex_binary, launcher);
+  assert.equal(report.codex_version, "codex-cli 0.171.0-mock");
+
+  const client = new McpTestClient(env);
+  try {
+    const profile = '测试 & %PATH% ! "模型" \\';
+    const run = await callTool(client, "codex_run", { cwd: root, task: "测试旧 PATH", profile });
+    const result = JSON.parse(run.result.content[0].text);
+    assert.equal(result.status, "done", JSON.stringify(result));
+    const { args } = JSON.parse(fs.readFileSync(capture, "utf8"));
+    assert.equal(args[args.indexOf("-p") + 1], profile);
+  } finally {
+    await client.close();
+  }
+});
+
+test("显式 CLI 路径缺失时自检和任务给出中文诊断，安装后控制台自动恢复", async (t) => {
+  const root = testDirectory(t);
+  const launcher = path.join(root, isWindows ? "mock-codex.cmd" : "mock-codex.sh");
+  const env = isolatedServerEnv(root, { CODEX_BIN: launcher });
+  const { status, report } = selfTest(env);
+  assert.equal(status, 1);
+  assert.equal(report.codex_binary, launcher);
+  assert.match(report.codex_error, /可执行文件或启动程序不存在/);
+  assert.match(report.codex_recovery_hint, /CODEX_BIN/);
+
+  const client = new McpTestClient(env);
+  try {
+    const version = async () => (await callTool(client, "app_get_dashboard")).result.structuredContent.environment.codex_version;
+    assert.equal(await version(), "Codex CLI 不可用");
+    const run = await callTool(client, "codex_run", { cwd: root, task: "测试启动失败" });
+    const failed = JSON.parse(run.result.content[0].text);
+    assert.equal(failed.blocker.type, "missing_dependency");
+    assert.match(failed.blocker.detail, /可执行文件或启动程序不存在/);
+    assert.match(failed.blocker.auto_recovery_hint, /重新派发任务/);
+    assert.equal(createMockCodex(root), launcher);
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    assert.equal(await version(), "codex-cli 0.171.0-mock");
+    fs.unlinkSync(launcher);
+    assert.equal(await version(), "Codex CLI 不可用");
+    createMockCodex(root);
+    const retried = await callTool(client, "codex_run", { cwd: root, task: "安装后立刻重试" });
+    assert.equal(JSON.parse(retried.result.content[0].text).status, "done");
+  } finally {
+    await client.close();
+  }
+});
+
+test("CLI 启动返回 ENOENT 时自检提示检查 CLI 安装路径", (t) => {
+  const root = testDirectory(t);
+  const { status, report } = selfTest(isolatedServerEnv(root, { CODEX_BIN: `missing-codex-${process.pid}` }));
+  assert.equal(status, 1);
+  assert.match(report.codex_error, /可执行文件或启动程序不存在/);
+  assert.match(report.codex_recovery_hint, /npm install -g @openai\/codex/);
+});
+
+test("Windows 批处理运行时找不到 node 时，任务显示可执行的中文建议", { skip: !isWindows }, async (t) => {
+  const root = testDirectory(t);
+  const launcher = writeExecutable(path.join(root, "测试 Codex.cmd"),
+    '@echo off\r\nif "%~1"=="--version" (\r\n  echo codex-cli 0.0.0\r\n  exit /b 0\r\n)\r\nset "PATH="\r\n"node" --version\r\n');
+  const client = new McpTestClient(isolatedServerEnv(root, { CODEX_BIN: launcher }));
+  try {
+    const run = await callTool(client, "codex_run", { cwd: root, task: "测试缺失 Node.js" });
+    const failed = JSON.parse(run.result.content[0].text);
+    assert.equal(failed.blocker.type, "missing_dependency", JSON.stringify(failed));
+    assert.match(failed.blocker.detail, /启动脚本找不到 Node\.js/);
+    assert.match(failed.blocker.auto_recovery_hint, /npm install -g @openai\/codex/);
+  } finally {
+    await client.close();
+  }
+  writeExecutable(launcher, '@echo off\r\nset "PATH="\r\n"node" --version\r\n');
+  const { status, report } = selfTest(isolatedServerEnv(root, { CODEX_BIN: launcher }));
+  assert.equal(status, 1);
+  assert.match(report.codex_error, /启动脚本找不到 Node\.js/);
+});
+
+test("MCP 服务、可视化控制台、调度与堵塞恢复全流程", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bridge-v2-test-"));
   const dataDir = path.join(tmpDir, "data");
   const workDir = path.join(tmpDir, "work");

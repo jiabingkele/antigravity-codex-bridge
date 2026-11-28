@@ -44,12 +44,13 @@
 
 1. **Google Antigravity**
 2. **Node.js >= 18**（仅作运行时，无需安装依赖）
-3. **OpenAI Codex CLI**（已安装并完成登录）：
+3. **OpenAI Codex CLI**（已安装并完成登录）。使用 npm 的用户可全局安装：
    ```bash
-   npm install -g @openai/codex   # 或通过 Windows Store / Homebrew 安装
+   npm install -g @openai/codex
    codex login
    codex --version
    ```
+   Windows 也可从微软商店安装 Codex Desktop 并在应用中登录。macOS 和 Linux 可继续使用包管理器或独立二进制安装的 CLI。
 
 ---
 
@@ -94,6 +95,13 @@ cd antigravity-codex-bridge
 chmod +x scripts/install.sh
 ./scripts/install.sh --start-daemon
 ```
+
+### CLI 自动探测与排错
+
+- 插件检查 `PATH` 和常见的全局安装目录，例如 Windows 的 `%APPDATA%\npm`、Homebrew 的 `bin` 和用户目录中的 `~/.local/bin`。对于 npm 安装，插件优先使用同一安装中的原生 CLI，并为启动脚本补齐 MCP 服务当前 Node.js 的目录。
+- Windows 只有商店版 Codex Desktop 时，即使 `%LOCALAPPDATA%\Microsoft\WindowsApps` 下没有 `codex.exe` 命令别名，插件也会查询当前用户已注册的应用包，并探测 `OpenAI.Codex_*` 对应的 `app\resources\codex.exe`。Windows 更新商店应用后，插件会重新探测可用版本。
+- 若控制台显示 **Codex CLI 不可用**、`spawn codex ENOENT` 或启动脚本找不到 `node`，在插件目录运行 `node server/codex-mcp-server.mjs --self-test`，查看 `codex_binary`、`codex_version` 和失败时的 `codex_error`。若设置了 `CODEX_BIN`，请检查它指向的文件。npm 安装缺少原生组件时，可运行 `npm install -g @openai/codex@latest` 修复。
+- 安装或修复 CLI 后，刷新控制台并重新派发启动失败的任务。控制台会自动重试版本探测。若 Antigravity 本身还无法启动 `node`，请重启 Antigravity，让它读取安装 Node.js 后的系统环境。
 
 ### Windows 沙箱故障
 
@@ -161,6 +169,7 @@ antigravity-codex-bridge/
 ├── rules/AGENTS.md                    # 调度路由 + 防堵塞自动解堵 + 去防御性语言常驻规则
 ├── skills/codex-orchestrator/SKILL.md # 完整编排、自动解堵剧本与验收指南
 ├── server/codex-mcp-server.mjs        # 零依赖 Node.js MCP Server + 调度器 + MCP App 后端
+├── server/codex-cli.mjs               # CLI 自动探测、启动环境与错误诊断
 ├── schemas/                           # 强制结构化 JSON 回执 Schema
 ├── ui/
 │   ├── src/                           # Codex Console 前端源码（基于 @modelcontextprotocol/ext-apps）

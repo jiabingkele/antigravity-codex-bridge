@@ -51,14 +51,7 @@ if [[ "${NODE_MAJOR}" -lt 18 ]]; then
 fi
 echo "[OK] Node.js ${NODE_VER}"
 
-# 2. Check Codex CLI
-if command -v codex >/dev/null 2>&1; then
-  echo "[OK] Codex CLI detected: $(codex --version 2>&1 | tail -n 1)"
-else
-  echo "[WARN] Codex CLI ('codex') not found in PATH. Install it (e.g. 'npm i -g @openai/codex') and run 'codex login'."
-fi
-
-# 3. Copy plugin files
+# 2. Copy plugin files
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -83,7 +76,7 @@ else
   echo "[OK] Copied plugin files (including Codex Console UI) to ${TARGET_ABS}"
 fi
 
-# 4. Apply custom defaults if overridden
+# 3. Apply custom defaults if overridden
 if [[ "${MODEL}" != "gpt-6.2-sol" || "${REASONING_EFFORT}" != "high" ]]; then
   node -e '
     const fs = require("fs");
@@ -96,14 +89,17 @@ if [[ "${MODEL}" != "gpt-6.2-sol" || "${REASONING_EFFORT}" != "high" ]]; then
   echo "[OK] Configured defaults: model=${MODEL}, reasoning_effort=${REASONING_EFFORT}"
 fi
 
-# 5. Self-test
+# 4. Run self-test using the same CLI resolver as the MCP server
 echo "==> Running MCP server self-test..."
-node "${TARGET_ABS}/server/codex-mcp-server.mjs" --self-test || true
+SELF_TEST_EXIT=0
+SELF_TEST_REPORT="$(node "${TARGET_ABS}/server/codex-mcp-server.mjs" --self-test)" || SELF_TEST_EXIT=$?
+printf '%s\n' "${SELF_TEST_REPORT}"
 
-# 6. Optional daemon start
-if [[ "${START_DAEMON}" -eq 1 ]] && command -v codex >/dev/null 2>&1; then
+# 5. Optional daemon start
+if [[ "${START_DAEMON}" -eq 1 && "${SELF_TEST_EXIT}" -eq 0 ]]; then
+  CODEX_BINARY="$(node -p 'JSON.parse(process.argv[1]).codex_binary' "${SELF_TEST_REPORT}")"
   echo "==> Starting Codex background app-server daemon..."
-  codex app-server daemon start || true
+  "${CODEX_BINARY}" app-server daemon start || true
 fi
 
 echo ""

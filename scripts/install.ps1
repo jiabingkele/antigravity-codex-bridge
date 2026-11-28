@@ -23,20 +23,7 @@ if ($nodeMajor -lt 18) {
 }
 Write-Host "[OK] Node.js $nodeVerRaw" -ForegroundColor Green
 
-# 2. Check Codex CLI
-$codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-if (-not $codexCmd) {
-    Write-Warning "Codex CLI ('codex') was not found in PATH. Install it (e.g. 'npm i -g @openai/codex' or Codex Desktop/Windows Store) and run 'codex login'."
-} else {
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $codexVerLines = & codex --version 2>&1 | ForEach-Object { $_.ToString() } | Where-Object { $_ -notmatch "could not create PATH aliases" }
-    $ErrorActionPreference = $prevPref
-    $codexVer = ($codexVerLines | Select-Object -Last 1)
-    Write-Host "[OK] Codex CLI detected: $codexVer" -ForegroundColor Green
-}
-
-# 3. Copy plugin files from repository root into Antigravity plugins directory
+# 2. Copy plugin files from repository root into Antigravity plugins directory
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $TargetResolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
 
@@ -87,7 +74,7 @@ if ($RepoRoot.Path.TrimEnd('\') -ieq $TargetResolved.TrimEnd('\')) {
     Write-Host "[OK] Copied plugin files (including Codex Console UI) to $TargetResolved" -ForegroundColor Green
 }
 
-# 4. Apply custom default model / reasoning effort if requested
+# 3. Apply custom default model / reasoning effort if requested
 if ($Model -ne "gpt-6.2-sol" -or $ReasoningEffort -ne "high") {
     $mcpConfigPath = Join-Path $TargetResolved "mcp_config.json"
     $cfg = Get-Content $mcpConfigPath -Raw | ConvertFrom-Json
@@ -97,24 +84,32 @@ if ($Model -ne "gpt-6.2-sol" -or $ReasoningEffort -ne "high") {
     Write-Host "[OK] Configured defaults: model=$Model, reasoning_effort=$ReasoningEffort" -ForegroundColor Green
 }
 
-# 5. Run self-test
+# 4. Run self-test using the same CLI resolver as the MCP server
 Write-Host "==> Running MCP server self-test..." -ForegroundColor Cyan
 $serverScript = Join-Path $TargetResolved "server\codex-mcp-server.mjs"
 $prevPref = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& node $serverScript --self-test
-$selfTestExit = $LASTEXITCODE
-$ErrorActionPreference = $prevPref
+$prevEncoding = [Console]::OutputEncoding
+try {
+    $ErrorActionPreference = "Continue"
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $selfTestReport = & node $serverScript --self-test
+    $selfTestExit = $LASTEXITCODE
+} finally {
+    [Console]::OutputEncoding = $prevEncoding
+    $ErrorActionPreference = $prevPref
+}
+$selfTestReport | Write-Host
 if ($selfTestExit -ne 0) {
-    Write-Warning "Self-test reported missing Codex CLI or error above. Make sure 'codex' is installed and logged in."
+    Write-Warning "Self-test failed. Check the report above for the detected CLI and error."
 }
 
-# 6. Optional: start local Codex daemon to reduce cold-start latency
-if ($StartDaemon -and $codexCmd) {
+# 5. Optional: start local Codex daemon to reduce cold-start latency
+if ($StartDaemon -and $selfTestExit -eq 0) {
+    $codexBinary = ($selfTestReport -join "`n" | ConvertFrom-Json).codex_binary
     Write-Host "==> Starting Codex background app-server daemon..." -ForegroundColor Cyan
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & codex app-server daemon start 2>&1 | ForEach-Object { $_.ToString() } | Where-Object { $_ -notmatch "could not create PATH aliases" }
+    & $codexBinary app-server daemon start 2>&1 | ForEach-Object { $_.ToString() } | Where-Object { $_ -notmatch "could not create PATH aliases" }
     $ErrorActionPreference = $prevPref
 }
 
@@ -122,6 +117,6 @@ Write-Host ""
 Write-Host "Installation complete!" -ForegroundColor Green
 Write-Host "Plugin path: $TargetResolved"
 Write-Host "Next steps:"
-Write-Host "  1. Ensure Codex is signed in: codex login"
-Write-Host "  2. (Optional speedup) Keep local daemon warm: codex app-server daemon start"
+Write-Host "  1. Sign in from Codex Desktop or run: codex login"
+Write-Host "  2. (Optional speedup) Keep local daemon warm with -StartDaemon."
 Write-Host "  3. Restart or start a new Antigravity conversation and check MCP Servers -> codex-bridge."

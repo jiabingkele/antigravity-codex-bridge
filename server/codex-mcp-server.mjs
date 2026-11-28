@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { codexInvocation, diagnoseCodexLaunch, getCodexCli, invalidateCodexCli } from "./codex-cli.mjs";
 
 const SERVER_NAME = "codex-bridge";
 const SERVER_VERSION = "2.1.0";
@@ -84,62 +85,6 @@ function getConsoleHtmlPath() {
   const override = process.env.CODEX_BRIDGE_CONSOLE_HTML;
   if (override && override.trim() !== "") return path.resolve(override.trim());
   return DEFAULT_CONSOLE_HTML_PATH;
-}
-
-function isFileExecutable(filePath) {
-  try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) return false;
-    if (process.platform === "win32") return true;
-    fs.accessSync(filePath, fs.constants.X_OK);
-    return true;
-  } catch {
-    if (process.platform === "win32" && /\.(exe|cmd|bat)$/i.test(filePath)) {
-      return fs.existsSync(filePath);
-    }
-    return false;
-  }
-}
-
-export function resolveCodexBinary() {
-  if (process.env.CODEX_BIN && process.env.CODEX_BIN.trim() !== "") {
-    return process.env.CODEX_BIN.trim();
-  }
-
-  const isWin = process.platform === "win32";
-  const pathEnv = process.env.PATH || "";
-  const searchDirs = pathEnv.split(path.delimiter).filter(Boolean);
-
-  if (isWin) {
-    const localAppData = process.env.LOCALAPPDATA;
-    const appData = process.env.APPDATA;
-    if (localAppData) {
-      searchDirs.push(path.join(localAppData, "Microsoft", "WindowsApps"));
-    }
-    if (appData) {
-      searchDirs.push(path.join(appData, "npm"));
-    }
-    const candidates = ["codex.exe", "codex.cmd", "codex.bat", "codex"];
-    for (const dir of searchDirs) {
-      for (const name of candidates) {
-        const full = path.join(dir, name);
-        if (isFileExecutable(full)) return full;
-      }
-    }
-    return "codex";
-  }
-
-  searchDirs.push(
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    path.join(os.homedir(), ".local", "bin"),
-    path.join(os.homedir(), ".npm-global", "bin")
-  );
-  for (const dir of searchDirs) {
-    const full = path.join(dir, "codex");
-    if (isFileExecutable(full)) return full;
-  }
-  return "codex";
 }
 
 function isInsideGitRepo(dir) {
@@ -340,7 +285,7 @@ function createTaskRecord(init) {
   return task;
 }
 
-function classifyBlocker({ timedOut, stalled, exitCode, errors, result }) {
+function classifyBlocker({ timedOut, stalled, exitCode, errors, result, launchBlocker }) {
   const joined = [
     ...(errors || []),
     ...(result?.blockers || []),
@@ -363,6 +308,7 @@ function classifyBlocker({ timedOut, stalled, exitCode, errors, result }) {
       hint: "先检查 git diff 确认已完成的改动，再用 codex_resume 续跑剩余步骤，或将剩余工作拆分为并行子任务重调度。",
     };
   }
+  if (launchBlocker) return launchBlocker;
   if (/(429|rate.?limit|too many requests|quota|overloaded)/i.test(joined)) {
     return {
       type: "rate_limit",
@@ -566,34 +512,7 @@ function cancelTaskById(taskId, reason = "由用户或调度器中止") {
 // Subprocess Runner with Live Progress & Stall Detection
 // ---------------------------------------------------------------------------
 
-function quoteCmdArg(arg) {
-  if (/^[a-zA-Z0-9_./:=\\-]+$/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '""')}"`;
-}
-
-function spawnCodexProcess(codexBin, args, cwd) {
-  const isWinBatch = process.platform === "win32" && /\.(cmd|bat)$/i.test(codexBin);
-
-  if (isWinBatch) {
-    const commandLine = [quoteCmdArg(codexBin), ...args.map(quoteCmdArg)].join(" ");
-    return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", commandLine], {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      env: process.env,
-    });
-  }
-
-  return spawn(codexBin, args, {
-    cwd,
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: false,
-    windowsHide: true,
-    env: process.env,
-  });
-}
-
-function runCodexSubprocess({
+async function runCodexSubprocess({
   task,
   job,
   args,
@@ -603,8 +522,10 @@ function runCodexSubprocess({
   timeoutSeconds,
   stallTimeoutSeconds,
 }) {
+  const startMs = Date.now();
+  const cli = await getCodexCli({ retryFailure: true });
+  const { binary: codexBin, env } = cli;
   return new Promise((resolve) => {
-    const startMs = Date.now();
     const logsDir = ensureLogsDir();
     const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${task.id}`;
     const logPath = path.join(logsDir, `${runId}.log`);
@@ -612,29 +533,42 @@ function runCodexSubprocess({
     persistState(true);
 
     const logStream = fs.createWriteStream(logPath, { encoding: "utf8" });
-    const codexBin = resolveCodexBinary();
     logStream.write(
       `# codex-bridge task ${task.id}\n# bin: ${codexBin}\n# cwd: ${cwd}\n# args: ${JSON.stringify(args)}\n\n`
     );
 
-    let child;
-    try {
-      child = spawnCodexProcess(codexBin, args, cwd);
-    } catch (err) {
+    function finishBeforeSpawn(launchBlocker, error) {
+      if (launchBlocker || error) logStream.write(`[stderr] ${launchBlocker?.detail || ""} ${error || ""}\n`);
       logStream.end();
       resolve({
         ok: false,
         exitCode: -1,
         timedOut: false,
         stalled: false,
-        cancelled: false,
-        durationSec: 0,
+        cancelled: job.cancelled,
+        cancelReason: job.cancelReason,
+        durationSec: Number(((Date.now() - startMs) / 1000).toFixed(2)),
         sessionId: task.session_id,
         usage: null,
-        errors: [`Failed to start Codex CLI (${codexBin}): ${err.message}`],
+        errors: launchBlocker ? [launchBlocker.detail] : error ? [error] : [],
+        launchBlocker,
         lastMessageRaw: "",
         logPath,
       });
+    }
+
+    if (job.cancelled || !cli.version) {
+      finishBeforeSpawn(cli.blocker, cli.error);
+      return;
+    }
+
+    let child;
+    try {
+      const invocation = codexInvocation(codexBin, args, env);
+      child = spawn(invocation.file, invocation.args, { ...invocation.options, cwd });
+    } catch (err) {
+      invalidateCodexCli(cli);
+      finishBeforeSpawn(diagnoseCodexLaunch(codexBin, { error: err, cwd }), err.message);
       return;
     }
 
@@ -646,7 +580,9 @@ function runCodexSubprocess({
     let timedOut = false;
     let stalled = false;
     let stdoutBuf = "";
-    let stderrTail = [];
+    let stderrBuf = "";
+    const stderrTail = [];
+    let launchBlocker = null;
 
     const effectiveTimeoutMs =
       Math.max(10, Number(timeoutSeconds || state.settings.default_timeout_seconds || DEFAULT_TIMEOUT_SEC)) * 1000;
@@ -760,18 +696,32 @@ function runCodexSubprocess({
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
       logStream.write(`[stderr] ${chunk}`);
-      for (const line of chunk.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed.includes("could not create PATH aliases")) continue;
-        touchActivity();
-        stderrTail.push(trimmed);
-        if (stderrTail.length > 14) stderrTail.shift();
+      const lines = (stderrBuf + chunk).split(/\r?\n/);
+      stderrBuf = lines.pop().slice(-8192);
+      for (const line of lines) {
+        if (keepStderrLine(line)) touchActivity();
+      }
+    });
+
+    function keepStderrLine(line) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.includes("could not create PATH aliases")) return false;
+      stderrTail.push(trimmed.slice(-8192));
+      if (stderrTail.length > 14) stderrTail.shift();
+      return true;
+    }
+
+    child.stdin.on("error", (err) => {
+      if (err.code !== "EPIPE" && err.code !== "ERR_STREAM_DESTROYED") {
+        logStream.write(`[stderr] 写入 Codex 输入失败：${err.message}\n`);
       }
     });
 
     child.on("error", (err) => {
-      errors.push(`Process error (${codexBin}): ${err.message}`);
+      invalidateCodexCli(cli);
+      launchBlocker = diagnoseCodexLaunch(codexBin, { error: err, cwd });
+      logStream.write(`[stderr] Codex CLI 进程错误（${codexBin}）：${err.message}\n`);
+      errors.push(launchBlocker?.detail || `Codex CLI 进程错误：${err.message}`);
     });
 
     child.on("close", (code) => {
@@ -780,6 +730,7 @@ function runCodexSubprocess({
       if (stdoutBuf.trim()) {
         processJsonlLine(stdoutBuf);
       }
+      keepStderrLine(stderrBuf);
       logStream.end();
 
       let lastMessageRaw = "";
@@ -799,6 +750,13 @@ function runCodexSubprocess({
         }
       }
 
+      if (code !== 0 && !job.cancelled && task.event_count === 0 && !launchBlocker) {
+        launchBlocker = diagnoseCodexLaunch(codexBin, { stderr: stderrTail.join("\n") });
+        if (launchBlocker) {
+          invalidateCodexCli(cli);
+          errors.push(launchBlocker.detail);
+        }
+      }
       if (code !== 0 && !job.cancelled && errors.length === 0 && stderrTail.length > 0) {
         errors.push(stderrTail.slice(-4).join(" | "));
       }
@@ -814,6 +772,7 @@ function runCodexSubprocess({
         sessionId,
         usage,
         errors,
+        launchBlocker,
         lastMessageRaw,
         logPath,
       });
@@ -876,6 +835,7 @@ function finalizeTaskRecord(task, run, { parsedReceipt, isReview, includeDiffSta
           stalled: run.stalled,
           exitCode: run.exitCode,
           errors: task.errors,
+          launchBlocker: run.launchBlocker,
           result: null,
         })
     : classifyBlocker({
@@ -883,6 +843,7 @@ function finalizeTaskRecord(task, run, { parsedReceipt, isReview, includeDiffSta
         stalled: run.stalled,
         exitCode: run.exitCode,
         errors: task.errors,
+        launchBlocker: run.launchBlocker,
         result: parsedReceipt,
       });
 
@@ -1373,28 +1334,8 @@ function summarizeTaskForList(t) {
   };
 }
 
-let cachedCodexVersion = null;
-function getCodexVersionFast() {
-  if (cachedCodexVersion !== null) return cachedCodexVersion;
-  const codexBin = resolveCodexBinary();
-  try {
-    const ver = spawnSync(codexBin, ["--version"], {
-      encoding: "utf8",
-      timeout: 3000,
-      windowsHide: true,
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(codexBin),
-    });
-    cachedCodexVersion =
-      ver.status === 0
-        ? (ver.stdout || ver.stderr || "detected").trim()
-        : "unavailable";
-  } catch {
-    cachedCodexVersion = "unavailable";
-  }
-  return cachedCodexVersion;
-}
-
-function buildDashboardSnapshot(options = {}) {
+async function buildDashboardSnapshot(options = {}) {
+  const cli = await getCodexCli();
   const counts = computeStatusCounts();
   const metrics = computeAggregateMetrics();
   const tasks = state.tasks.slice(0, 80).map(summarizeTaskForList);
@@ -1402,7 +1343,7 @@ function buildDashboardSnapshot(options = {}) {
     ok: true,
     generated_at: new Date().toISOString(),
     environment: {
-      codex_version: getCodexVersionFast(),
+      codex_version: cli.version || "Codex CLI 不可用",
       default_model: DEFAULT_MODEL,
       default_reasoning_effort: DEFAULT_REASONING_EFFORT,
       platform: process.platform,
@@ -2050,7 +1991,7 @@ async function handleRequest(msg) {
     const toolArgs = params?.arguments || {};
     try {
       if (toolName === "codex_console") {
-        const snapshot = buildDashboardSnapshot(toolArgs);
+        const snapshot = await buildDashboardSnapshot(toolArgs);
         const summaryLine = `Codex 控制台已就绪：运行中=${snapshot.counts.running}，排队中=${snapshot.counts.queued}，堵塞=${snapshot.counts.blocked + snapshot.counts.needs_input}，已完成=${snapshot.counts.done}，已自动接管=${snapshot.counts.resolved}，缓存命中率=${snapshot.metrics.cache_hit_rate_pct}%。`;
         sendResult(id, {
           content: [{ type: "text", text: summaryLine }],
@@ -2076,7 +2017,7 @@ async function handleRequest(msg) {
       } else if (toolName === "codex_read_log") {
         payload = handleReadLog(toolArgs);
       } else if (toolName === "app_get_dashboard") {
-        payload = buildDashboardSnapshot();
+        payload = await buildDashboardSnapshot();
       } else if (toolName === "app_get_task_detail") {
         payload = handleAppGetTaskDetail(toolArgs);
       } else if (toolName === "app_dispatch_task") {
@@ -2115,42 +2056,23 @@ async function handleRequest(msg) {
   }
 }
 
-function runSelfTest() {
-  const codexBin = resolveCodexBinary();
+async function runSelfTest() {
+  const cli = await getCodexCli();
   const schemasOk =
     fs.existsSync(RESULT_SCHEMA_PATH) && fs.existsSync(REVIEW_SCHEMA_PATH);
   const consoleHtmlPath = getConsoleHtmlPath();
   const consoleUiOk = fs.existsSync(consoleHtmlPath) && fs.statSync(consoleHtmlPath).size > 0;
-  let codexVersion = "not found";
-  try {
-    const ver = spawnSync(codexBin, ["--version"], {
-      encoding: "utf8",
-      timeout: 5000,
-      windowsHide: true,
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(codexBin),
-    });
-    if (ver.status === 0) {
-      codexVersion = (ver.stdout || ver.stderr || "").trim();
-    } else {
-      codexVersion = `error (exit ${ver.status}): ${(ver.stderr || ver.error?.message || "").trim()}`;
-    }
-  } catch (err) {
-    codexVersion = `error: ${err.message}`;
-  }
-
   const report = {
-    ok:
-      schemasOk &&
-      consoleUiOk &&
-      !codexVersion.startsWith("error") &&
-      codexVersion !== "not found",
+    ok: schemasOk && consoleUiOk && Boolean(cli.version),
     version: SERVER_VERSION,
     node: process.version,
     platform: process.platform,
     plugin_root: PLUGIN_ROOT,
     data_dir: resolveDataDir(),
-    codex_binary: codexBin,
-    codex_version: codexVersion,
+    codex_binary: cli.binary,
+    codex_version: cli.version || "Codex CLI 不可用",
+    ...(cli.blocker ? { codex_error: cli.blocker.detail, codex_recovery_hint: cli.blocker.hint }
+      : cli.error ? { codex_error: cli.error } : {}),
     default_model: DEFAULT_MODEL,
     default_reasoning_effort: DEFAULT_REASONING_EFFORT,
     max_concurrency: DEFAULT_MAX_CONCURRENCY,
@@ -2162,7 +2084,7 @@ function runSelfTest() {
     app_only_tools: TOOLS.filter((t) => t._meta?.ui?.visibility?.length === 1 && t._meta.ui.visibility[0] === "app").map((t) => t.name),
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  process.exit(report.ok ? 0 : 1);
+  process.exitCode = report.ok ? 0 : 1;
 }
 
 function startStdioServer() {
@@ -2222,8 +2144,7 @@ function isMainModule() {
   }
 }
 
-if (process.argv.includes("--self-test")) {
-  runSelfTest();
-} else if (isMainModule()) {
-  startStdioServer();
+if (isMainModule()) {
+  if (process.argv.includes("--self-test")) await runSelfTest();
+  else startStdioServer();
 }
